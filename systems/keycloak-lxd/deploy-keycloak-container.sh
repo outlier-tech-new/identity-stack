@@ -82,27 +82,6 @@ echo "Waiting for cloud-init..."
 lxc exec "${CONTAINER_NAME}" -- cloud-init status --wait || true
 
 # =============================================================================
-# Verify Bridge Attachment
-# =============================================================================
-echo ""
-echo "=== Verifying Bridge Attachment ==="
-
-HOST_VETH=$(lxc info "${CONTAINER_NAME}" | grep "Host interface:" | awk '{print $3}')
-if [ -z "${HOST_VETH}" ]; then
-    echo "ERROR: Could not determine host veth interface."
-    exit 1
-fi
-echo "Container veth: ${HOST_VETH}"
-
-if ! bridge link show | grep -q "${HOST_VETH}.*master ${BRIDGE_NAME}"; then
-    echo "Attaching ${HOST_VETH} to ${BRIDGE_NAME}..."
-    sudo ip link set "${HOST_VETH}" master "${BRIDGE_NAME}"
-    lxc restart "${CONTAINER_NAME}"
-    sleep 5
-fi
-echo "Bridge attachment... OK"
-
-# =============================================================================
 # Configure Static IP
 # =============================================================================
 echo ""
@@ -136,6 +115,32 @@ if [[ "${ASSIGNED_IP}" != "${STATIC_IP}" ]]; then
     exit 1
 fi
 echo "Static IP configured: ${ASSIGNED_IP}"
+
+# =============================================================================
+# Verify/Fix Bridge Attachment (AFTER netplan, which can break it)
+# =============================================================================
+echo ""
+echo "=== Verifying Bridge Attachment ==="
+
+HOST_VETH=$(lxc info "${CONTAINER_NAME}" | grep "Host interface:" | awk '{print $3}')
+if [ -z "${HOST_VETH}" ]; then
+    echo "ERROR: Could not determine host veth interface."
+    exit 1
+fi
+echo "Container veth: ${HOST_VETH}"
+
+if ! bridge link show | grep -q "${HOST_VETH}.*master ${BRIDGE_NAME}"; then
+    echo "Veth NOT attached to bridge. Attaching ${HOST_VETH} to ${BRIDGE_NAME}..."
+    sudo ip link set "${HOST_VETH}" master "${BRIDGE_NAME}"
+    sleep 1
+    if ! bridge link show | grep -q "${HOST_VETH}.*master ${BRIDGE_NAME}"; then
+        echo "ERROR: Failed to attach veth to bridge."
+        exit 1
+    fi
+    echo "Attached successfully."
+else
+    echo "Bridge attachment... OK"
+fi
 
 # =============================================================================
 # Connectivity Test
