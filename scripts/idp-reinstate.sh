@@ -11,7 +11,10 @@
 # 4. Starts local stack (via lib/idp-start-stack.sh)
 # 5. Adds this node back to Traefik (via lib/idp-traefik-update.sh)
 #
-# Usage: sudo ./idp-reinstate.sh --primary <idp01|idp02>
+# Usage: sudo ./idp-reinstate.sh --standby-of <idp01|idp02>
+#
+# Example: On idp001, to reinstate as standby replicating from idp02:
+#   sudo ./idp-reinstate.sh --standby-of idp02
 #
 # Environment:
 #   REPL_PASSWORD - PostgreSQL replication password (will prompt if not set)
@@ -31,13 +34,18 @@ PRIMARY_SHORT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --primary) PRIMARY_SHORT="$2"; shift 2 ;;
+        --standby-of|--primary) PRIMARY_SHORT="$2"; shift 2 ;;  # --primary kept for backwards compat
         *) echo "Unknown: $1"; exit 1 ;;
     esac
 done
 
 if [[ -z "${PRIMARY_SHORT}" ]]; then
-    echo "Usage: sudo ./idp-reinstate.sh --primary <idp01|idp02>"
+    echo "Usage: sudo ./idp-reinstate.sh --standby-of <idp01|idp02>"
+    echo ""
+    echo "Reinstates THIS node as a standby, replicating from the specified primary."
+    echo ""
+    echo "Example: On idp001, to become standby of idp02:"
+    echo "  sudo ./idp-reinstate.sh --standby-of idp02"
     exit 1
 fi
 
@@ -95,7 +103,7 @@ step "2/5: Stopping local stack..."
 bash "${LIB_DIR}/idp-stop-stack.sh" --force
 
 step "3/5: Rebuilding PostgreSQL as standby..."
-bash "${LIB_DIR}/idp-rebuild-standby.sh" --primary ${PRIMARY_FQDN}
+bash "${LIB_DIR}/idp-rebuild-standby.sh" --replicate-from ${PRIMARY_FQDN}
 
 step "4/5: Configuring and starting Keycloak..."
 bash "${LIB_DIR}/idp-switch-db.sh" --db-host ${PRIMARY_FQDN} --no-restart

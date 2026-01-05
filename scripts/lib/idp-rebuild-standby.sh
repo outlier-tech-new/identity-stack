@@ -5,7 +5,10 @@
 # Rebuilds the local PostgreSQL as a streaming standby from a primary.
 # WARNING: This destroys all local PostgreSQL data!
 #
-# Usage: sudo ./idp-rebuild-standby.sh --primary <hostname>
+# Usage: sudo ./idp-rebuild-standby.sh --replicate-from <hostname>
+#
+# Example: Rebuild this node to replicate from idp02:
+#   sudo ./idp-rebuild-standby.sh --replicate-from idp02.outliertechnology.co.uk
 #
 # Environment:
 #   REPL_PASSWORD - Replication user password (will prompt if not set)
@@ -21,14 +24,17 @@ PRIMARY_HOST=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --primary) PRIMARY_HOST="$2"; shift 2 ;;
+        --replicate-from|--primary) PRIMARY_HOST="$2"; shift 2 ;;  # --primary kept for backwards compat
         *) echo "Unknown: $1"; exit 1 ;;
     esac
 done
 
 if [[ -z "${PRIMARY_HOST}" ]]; then
-    echo "Usage: sudo ./idp-rebuild-standby.sh --primary <hostname>"
-    echo "  e.g.: sudo ./idp-rebuild-standby.sh --primary idp02.outliertechnology.co.uk"
+    echo "Usage: sudo ./idp-rebuild-standby.sh --replicate-from <hostname>"
+    echo ""
+    echo "Rebuilds THIS node to replicate from the specified primary."
+    echo ""
+    echo "Example: sudo ./idp-rebuild-standby.sh --replicate-from idp02.outliertechnology.co.uk"
     exit 1
 fi
 
