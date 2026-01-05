@@ -1,189 +1,150 @@
 #!/bin/bash
 # =============================================================================
-# IDP Role Switch Script (Planned Switchover)
+# IDP Role Switch (Operational)
 # =============================================================================
-# Gracefully switches primary/standby roles when BOTH nodes are healthy.
-# This is for planned maintenance or load redistribution, NOT emergency failover.
+# Planned switchover when BOTH nodes are healthy.
+# This swaps primary and standby roles gracefully.
+#
+# This script orchestrates:
+# 1. Verifies both nodes are healthy
+# 2. Promotes local standby to primary
+# 3. Rebuilds peer as new standby
+# 4. Updates Keycloak on both nodes
+# 5. No Traefik changes (both stay in load balancer)
 #
 # Usage: sudo ./idp-role-switch.sh
 #
-# This script:
-# 1. Verifies both nodes are healthy
-# 2. Promotes the current standby to primary
-# 3. Demotes the current primary to standby  
-# 4. Updates Keycloak on both nodes
-# 5. No Traefik changes (both nodes stay in load balancer)
+# Must be run from the STANDBY node (the one that will become primary).
+#
+# Environment:
+#   REPL_PASSWORD - PostgreSQL replication password (will prompt if not set)
 # =============================================================================
 
 set -euo pipefail
 
-# Configuration
-PG_CONTAINER="postgres-lxc"
-KC_CONTAINER="keycloak-lxc"
-PG_VERSION="16"
-PG_DATA="/var/lib/postgresql/${PG_VERSION}/main"
-KC_CONF="/opt/keycloak/conf/keycloak.conf"
-
-# Determine which node we're on and set peer
-THIS_HOST=$(hostname -s)
-case "${THIS_HOST}" in
-    idp001|idp01)
-        THIS_FQDN="idp01.outliertechnology.co.uk"
-        PEER_HOST="idp002"
-        PEER_FQDN="idp02.outliertechnology.co.uk"
-        ;;
-    idp002|idp02)
-        THIS_FQDN="idp02.outliertechnology.co.uk"
-        PEER_HOST="idp001"
-        PEER_FQDN="idp01.outliertechnology.co.uk"
-        ;;
-    *)
-        echo "[ERROR] Unknown host: ${THIS_HOST}. Must run on idp001 or idp002."
-        exit 1
-        ;;
-esac
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/lib"
 
 log() { echo "[INFO] $(date '+%H:%M:%S') $*"; }
 warn() { echo "[WARN] $(date '+%H:%M:%S') $*" >&2; }
 error() { echo "[ERROR] $(date '+%H:%M:%S') $*" >&2; exit 1; }
 step() { echo -e "\n[STEP] $*"; }
 
-run() {
-    log "Running: $*"
-    eval "$@"
-}
+PG_CONTAINER="postgres-lxc"
+KC_CONTAINER="keycloak-lxc"
+
+# Determine hosts
+THIS_HOST=$(hostname -s)
+case "${THIS_HOST}" in
+    idp001|idp01)
+        THIS_SHORT="idp01"
+        THIS_FQDN="idp01.outliertechnology.co.uk"
+        PEER_HOST="idp002"
+        PEER_SHORT="idp02"
+        PEER_FQDN="idp02.outliertechnology.co.uk"
+        ;;
+    idp002|idp02)
+        THIS_SHORT="idp02"
+        THIS_FQDN="idp02.outliertechnology.co.uk"
+        PEER_HOST="idp001"
+        PEER_SHORT="idp01"
+        PEER_FQDN="idp01.outliertechnology.co.uk"
+        ;;
+    *)
+        error "Unknown host: ${THIS_HOST}"
+        ;;
+esac
 
 echo "=============================================="
-echo "    IDP Role Switch (Planned Switchover)"
+echo "    IDP Planned Role Switch"
 echo "=============================================="
-echo "  This Host: ${THIS_HOST} (${THIS_FQDN})"
-echo "  Peer Host: ${PEER_HOST} (${PEER_FQDN})"
+echo "  This Node: ${THIS_HOST} (current standby -> new primary)"
+echo "  Peer Node: ${PEER_HOST} (current primary -> new standby)"
 echo "=============================================="
 
 # =============================================================================
 # Pre-flight Checks
 # =============================================================================
 
-step "1/7: Checking local PostgreSQL status..."
-LOCAL_IS_STANDBY=$(lxc exec ${PG_CONTAINER} -- sudo -u postgres psql -tAc "SELECT pg_is_in_recovery();" 2>/dev/null || echo "error")
+step "1/6: Verifying local node is currently STANDBY..."
+IS_STANDBY=$(lxc exec ${PG_CONTAINER} -- sudo -u postgres psql -tAc "SELECT pg_is_in_recovery();" 2>/dev/null || echo "error")
 
-if [[ "${LOCAL_IS_STANDBY}" == "error" ]]; then
-    error "Cannot connect to local PostgreSQL!"
+if [[ "${IS_STANDBY}" != "t" ]]; then
+    error "This node is NOT a standby. Role switch must be run from the standby."
+    error "If this is the primary, SSH to ${PEER_HOST} and run the switch there."
+fi
+log "Confirmed: This node is STANDBY"
+
+step "2/6: Verifying peer node is available and is PRIMARY..."
+if ! ssh -o ConnectTimeout=10 -o BatchMode=yes sysadmin@${PEER_HOST} "lxc exec ${PG_CONTAINER} -- pg_isready" >/dev/null 2>&1; then
+    error "Peer (${PEER_HOST}) is not reachable. For emergency failover, use: sudo ./idp-failover.sh"
 fi
 
-if [[ "${LOCAL_IS_STANDBY}" == "t" ]]; then
-    LOCAL_ROLE="STANDBY"
-    CURRENT_PRIMARY="${PEER_FQDN}"
-    CURRENT_STANDBY="${THIS_FQDN}"
-else
-    LOCAL_ROLE="PRIMARY"
-    CURRENT_PRIMARY="${THIS_FQDN}"
-    CURRENT_STANDBY="${PEER_FQDN}"
-fi
-log "Local PostgreSQL is: ${LOCAL_ROLE}"
-
-step "2/7: Checking peer node availability..."
-if ! ssh -o ConnectTimeout=5 -o BatchMode=yes sysadmin@${PEER_HOST} "lxc exec ${PG_CONTAINER} -- pg_isready" >/dev/null 2>&1; then
-    error "Peer node (${PEER_HOST}) is not reachable or PostgreSQL is down!"
-    error "For emergency failover with a failed node, use: sudo ./idp-failover.sh"
-fi
-log "Peer node (${PEER_HOST}) is healthy"
-
-step "3/7: Checking peer PostgreSQL role..."
 PEER_IS_STANDBY=$(ssh sysadmin@${PEER_HOST} "lxc exec ${PG_CONTAINER} -- sudo -u postgres psql -tAc \"SELECT pg_is_in_recovery();\"" 2>/dev/null || echo "error")
+if [[ "${PEER_IS_STANDBY}" != "f" ]]; then
+    error "Peer (${PEER_HOST}) is not running as PRIMARY!"
+fi
+log "Confirmed: Peer (${PEER_HOST}) is PRIMARY"
 
-if [[ "${PEER_IS_STANDBY}" == "error" ]]; then
-    error "Cannot query peer PostgreSQL!"
+# Get replication password
+if [[ -z "${REPL_PASSWORD:-}" ]]; then
+    read -s -p "Enter PostgreSQL replication password: " REPL_PASSWORD
+    echo ""
+    export REPL_PASSWORD
 fi
 
-if [[ "${LOCAL_ROLE}" == "PRIMARY" && "${PEER_IS_STANDBY}" != "t" ]]; then
-    error "Configuration error: Local is PRIMARY but peer is not STANDBY!"
-fi
-if [[ "${LOCAL_ROLE}" == "STANDBY" && "${PEER_IS_STANDBY}" != "f" ]]; then
-    error "Configuration error: Local is STANDBY but peer is not PRIMARY!"
-fi
-
-echo ""
-echo "Current Configuration:"
-echo "  PRIMARY:  ${CURRENT_PRIMARY}"
-echo "  STANDBY:  ${CURRENT_STANDBY}"
 echo ""
 echo "After switch:"
-echo "  PRIMARY:  ${CURRENT_STANDBY}"
-echo "  STANDBY:  ${CURRENT_PRIMARY}"
+echo "  NEW PRIMARY: ${THIS_HOST} (${THIS_FQDN})"
+echo "  NEW STANDBY: ${PEER_HOST} (${PEER_FQDN})"
 echo ""
-
 read -p "Proceed with role switch? (yes/no): " CONFIRM
-if [[ "${CONFIRM}" != "yes" ]]; then
-    echo "Aborted."
-    exit 0
-fi
+[[ "${CONFIRM}" != "yes" ]] && { echo "Aborted."; exit 0; }
 
 # =============================================================================
-# Perform Role Switch
+# Role Switch Steps
 # =============================================================================
 
-if [[ "${LOCAL_ROLE}" == "STANDBY" ]]; then
-    # This node is standby - we'll promote it
-    NEW_PRIMARY="${THIS_FQDN}"
-    NEW_STANDBY="${PEER_FQDN}"
-    
-    step "4/7: Promoting local PostgreSQL to PRIMARY..."
-    run "lxc exec ${PG_CONTAINER} -- sudo -u postgres /usr/lib/postgresql/${PG_VERSION}/bin/pg_ctl promote -D ${PG_DATA}"
-    sleep 5
-    
-    # Verify promotion
-    if lxc exec ${PG_CONTAINER} -- sudo -u postgres psql -tAc "SELECT pg_is_in_recovery();" | grep -q "f"; then
-        log "Local PostgreSQL successfully promoted to PRIMARY"
-    else
-        error "Promotion failed!"
-    fi
-    
-    step "5/7: Converting peer (${PEER_HOST}) to STANDBY..."
-    # Stop peer PostgreSQL, take base backup from new primary, restart as standby
-    ssh sysadmin@${PEER_HOST} "
-        lxc exec ${PG_CONTAINER} -- systemctl stop postgresql
-        lxc exec ${PG_CONTAINER} -- bash -c 'rm -rf ${PG_DATA}/*'
-        lxc exec ${PG_CONTAINER} -- sudo -u postgres pg_basebackup -h ${NEW_PRIMARY} -U replicator -D ${PG_DATA} -Fp -Xs -P -R
-        lxc exec ${PG_CONTAINER} -- systemctl start postgresql
-    "
-    log "Peer converted to standby"
-    
-else
-    # This node is primary - we need to run switch from the standby
-    error "Role switch must be initiated from the STANDBY node."
-    error "SSH to ${PEER_HOST} and run: sudo ./idp-role-switch.sh"
-fi
+step "3/6: Promoting local PostgreSQL to PRIMARY..."
+bash "${LIB_DIR}/idp-promote-db.sh"
 
-step "6/7: Updating Keycloak configurations..."
+step "4/6: Updating local Keycloak to use local database..."
+bash "${LIB_DIR}/idp-switch-db.sh" --db-host local
 
-# Update local Keycloak to use local database
-log "Updating local Keycloak to use local PostgreSQL..."
-LOCAL_PG_IP=$(lxc exec ${PG_CONTAINER} -- hostname -I | awk '{print $1}')
-lxc exec ${KC_CONTAINER} -- sed -i "s|db-url=jdbc:postgresql://[^/]*|db-url=jdbc:postgresql://${LOCAL_PG_IP}|" ${KC_CONF}
-lxc exec ${KC_CONTAINER} -- systemctl restart keycloak
+step "5/6: Converting peer to STANDBY..."
+log "Stopping peer stack..."
+ssh sysadmin@${PEER_HOST} "lxc exec ${KC_CONTAINER} -- systemctl stop keycloak" 2>/dev/null || true
+ssh sysadmin@${PEER_HOST} "lxc exec ${PG_CONTAINER} -- systemctl stop postgresql" 2>/dev/null || true
 
-# Update peer Keycloak to use new primary (this node)
-log "Updating peer Keycloak to use new primary..."
+log "Rebuilding peer as standby from this node..."
 ssh sysadmin@${PEER_HOST} "
-    lxc exec ${KC_CONTAINER} -- sed -i 's|db-url=jdbc:postgresql://[^/]*|db-url=jdbc:postgresql://${NEW_PRIMARY}|' ${KC_CONF}
-    lxc exec ${KC_CONTAINER} -- systemctl restart keycloak
+    export REPL_PASSWORD='${REPL_PASSWORD}'
+    cd /srv/identity-stack/scripts/lib
+    sudo -E ./idp-rebuild-standby.sh --primary ${THIS_FQDN}
 "
 
-step "7/7: Verifying new configuration..."
+step "6/6: Updating peer Keycloak and starting stack..."
+ssh sysadmin@${PEER_HOST} "
+    cd /srv/identity-stack/scripts/lib
+    sudo ./idp-switch-db.sh --db-host ${THIS_FQDN} --no-restart
+    sudo ./idp-start-stack.sh
+"
 
-# Check replication on new primary
-log "Checking replication status on new primary..."
+# =============================================================================
+# Verify
+# =============================================================================
+
+log "Verifying replication..."
+sleep 3
 lxc exec ${PG_CONTAINER} -- sudo -u postgres psql -c "SELECT client_addr, state, sent_lsn, replay_lsn FROM pg_stat_replication;"
 
 echo ""
 echo "=============================================="
 echo "    ROLE SWITCH COMPLETE"
 echo "=============================================="
-echo "  New PRIMARY: ${NEW_PRIMARY}"
-echo "  New STANDBY: ${NEW_STANDBY}"
+echo "  New PRIMARY: ${THIS_HOST} (${THIS_FQDN})"
+echo "  New STANDBY: ${PEER_HOST} (${PEER_FQDN})"
 echo ""
 echo "  Both nodes remain in Traefik load balancer."
-echo "  Both Keycloaks point to the new primary database."
+echo "  Both Keycloaks point to the new primary."
 echo "=============================================="
-
