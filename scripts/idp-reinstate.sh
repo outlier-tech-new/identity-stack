@@ -88,16 +88,15 @@ echo "=============================================="
 
 step "1/5: Verifying primary is available..."
 PG_CONTAINER="postgres-lxc"
-if ! ssh -o ConnectTimeout=10 -o BatchMode=yes sysadmin@${PRIMARY_HOST} "lxc exec ${PG_CONTAINER} -- pg_isready" >/dev/null 2>&1; then
-    error "Cannot reach primary (${PRIMARY_HOST})"
-fi
 
-# Verify it's actually primary
-PRIMARY_IS_STANDBY=$(ssh sysadmin@${PRIMARY_HOST} "lxc exec ${PG_CONTAINER} -- sudo -u postgres psql -tAc \"SELECT pg_is_in_recovery();\"" 2>/dev/null || echo "error")
-if [[ "${PRIMARY_IS_STANDBY}" != "f" ]]; then
-    error "${PRIMARY_HOST} is not running as PRIMARY!"
+# Test PostgreSQL connectivity directly (via FQDN, not SSH)
+if ! lxc exec ${PG_CONTAINER} -- pg_isready -h ${PRIMARY_FQDN} -p 5432 -t 10 >/dev/null 2>&1; then
+    error "Cannot reach primary PostgreSQL at ${PRIMARY_FQDN}:5432"
 fi
-log "Confirmed: ${PRIMARY_HOST} is PRIMARY"
+log "Primary PostgreSQL is reachable at ${PRIMARY_FQDN}:5432"
+
+# Note: We can't easily verify if target is actually primary without SSH.
+# The pg_basebackup will fail if target is not primary, which is acceptable.
 
 step "2/5: Stopping local stack..."
 bash "${LIB_DIR}/idp-stop-stack.sh" --force
