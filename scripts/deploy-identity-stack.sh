@@ -46,11 +46,12 @@ Options:
 Steps performed:
     1. Set hostname and update /etc/hosts
     2. Install and configure LXD
-    3. Set up LXD networking (lxdbr-idp bridge with 172.22.0.0/24)
-    4. Deploy Postgres LXD container
-    5. Deploy Keycloak LXD container
-    6. Configure Keycloak with Postgres backend
-    7. Set up port forwarding (8080, 9000 -> Keycloak container)
+    3. Initialize LXD
+    4. Set up LXD storage pool
+    5. Set up LXD networking (lxdbr0 bridge with 172.22.0.0/24)
+    6. Deploy Postgres LXD container
+    7. Deploy Keycloak LXD container
+    8. Set up port forwarding (8080, 9000 -> Keycloak container)
 
 EOF
 }
@@ -137,7 +138,7 @@ fi
 # -----------------------------------------------------------------------------
 # Step 1: Set Hostname
 # -----------------------------------------------------------------------------
-log "Step 1/7: Setting hostname..."
+log "Step 1/8: Setting hostname..."
 CURRENT_HOSTNAME=$(hostname)
 if [[ "${CURRENT_HOSTNAME}" != "${HOST}" ]]; then
     run "hostnamectl set-hostname ${HOST}"
@@ -152,7 +153,7 @@ fi
 # -----------------------------------------------------------------------------
 # Step 2: Install LXD
 # -----------------------------------------------------------------------------
-log "Step 2/7: Installing LXD..."
+log "Step 2/8: Installing LXD..."
 if command -v lxd &> /dev/null; then
     log_success "LXD already installed"
 else
@@ -164,39 +165,49 @@ fi
 # -----------------------------------------------------------------------------
 # Step 3: Initialize LXD
 # -----------------------------------------------------------------------------
-log "Step 3/7: Initializing LXD..."
+log "Step 3/8: Initializing LXD..."
 cd "${ROOT_DIR}/systems/lxd"
 
+# Run init script (handles its own idempotency)
+run "bash setup-lxd-init.sh"
+log_success "LXD initialized"
+
+# -----------------------------------------------------------------------------
+# Step 4: Set up LXD Storage
+# -----------------------------------------------------------------------------
+log "Step 4/8: Setting up LXD storage pool..."
 if lxc storage show default >/dev/null 2>&1; then
-    log_success "LXD already initialized"
+    log_success "LXD storage pool 'default' already exists"
 else
-    run "bash setup-lxd-init.sh"
-    log_success "LXD initialized"
+    run "bash setup-lxd-storage.sh"
+    log_success "LXD storage pool created"
 fi
 
 # -----------------------------------------------------------------------------
-# Step 4: Set up LXD Networking
+# Step 5: Set up LXD Networking
 # -----------------------------------------------------------------------------
-log "Step 4/7: Setting up LXD networking..."
-if lxc network show lxdbr-idp >/dev/null 2>&1; then
-    log_success "LXD network lxdbr-idp already exists"
+log "Step 5/8: Setting up LXD networking..."
+if lxc network show lxdbr0 >/dev/null 2>&1; then
+    log_success "LXD network lxdbr0 already exists"
 else
     run "bash setup-lxd-network.sh"
     log_success "LXD network configured"
 fi
 
 # Set up LXD profile if needed
-if lxc profile show idp-profile >/dev/null 2>&1; then
-    log_success "LXD profile idp-profile already exists"
+if lxc profile show default >/dev/null 2>&1; then
+    # Profile exists, ensure it's configured correctly
+    run "bash setup-lxd-profile.sh"
+    log_success "LXD profile configured"
 else
     run "bash setup-lxd-profile.sh"
     log_success "LXD profile created"
 fi
 
 # -----------------------------------------------------------------------------
-# Step 5: Deploy Postgres Container
+# Step 6: Deploy Postgres Container
 # -----------------------------------------------------------------------------
-log "Step 5/7: Deploying Postgres container..."
+log "Step 6/8: Deploying Postgres container..."
 cd "${ROOT_DIR}/systems/postgres-lxd"
 
 if lxc info postgres-lxc >/dev/null 2>&1; then
@@ -211,9 +222,9 @@ run "bash configure-postgres.sh"
 log_success "Postgres configured"
 
 # -----------------------------------------------------------------------------
-# Step 6: Deploy Keycloak Container
+# Step 7: Deploy Keycloak Container
 # -----------------------------------------------------------------------------
-log "Step 6/7: Deploying Keycloak container..."
+log "Step 7/8: Deploying Keycloak container..."
 cd "${ROOT_DIR}/systems/keycloak-lxd"
 
 if lxc info keycloak-lxc >/dev/null 2>&1; then
@@ -233,9 +244,9 @@ run "bash configure-keycloak.sh"
 log_success "Keycloak configured"
 
 # -----------------------------------------------------------------------------
-# Step 7: Set up Port Forwarding
+# Step 8: Set up Port Forwarding
 # -----------------------------------------------------------------------------
-log "Step 7/7: Setting up port forwarding..."
+log "Step 8/8: Setting up port forwarding..."
 cd "${ROOT_DIR}/scripts"
 run "bash setup-port-forward.sh"
 log_success "Port forwarding configured"
