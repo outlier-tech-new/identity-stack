@@ -32,7 +32,14 @@ echo "=============================================="
 # PostgreSQL status
 echo ""
 echo "=== PostgreSQL ==="
-PG_RUNNING=$(run_cmd "lxc exec ${PG_CONTAINER} -- pg_isready 2>/dev/null && echo 'running' || echo 'stopped'" 2>/dev/null || echo "container-missing")
+# Check if container exists first
+if ! lxc info ${PG_CONTAINER} >/dev/null 2>&1; then
+    PG_RUNNING="container-missing"
+elif lxc exec ${PG_CONTAINER} -- pg_isready >/dev/null 2>&1; then
+    PG_RUNNING="running"
+else
+    PG_RUNNING="stopped"
+fi
 
 if [[ "${PG_RUNNING}" == "running" ]]; then
     echo "  Service:  RUNNING"
@@ -67,6 +74,7 @@ else
 fi
 
 # Traefik status (check if in load balancer)
+# Note: Requires SSH keys from this host to sec nodes
 echo ""
 echo "=== Traefik Load Balancer ==="
 case "${THIS_HOST}" in
@@ -77,8 +85,16 @@ esac
 
 if [[ -n "${CHECK_FQDN}" ]]; then
     for TN in sec001 sec002; do
-        IN_LB=$(ssh -o ConnectTimeout=3 -o BatchMode=yes sysadmin@${TN} "grep -q '${CHECK_FQDN}' /srv/security-stack/systems/traefik/dynamic/keycloak.yml && echo 'YES' || echo 'NO'" 2>/dev/null || echo "unreachable")
-        echo "  ${TN}: ${IN_LB}"
+        # Try SSH, skip if no connectivity
+        if ssh -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=no sysadmin@${TN} "test -f /srv/security-stack/systems/traefik/dynamic/keycloak.yml" 2>/dev/null; then
+            if ssh -o ConnectTimeout=3 -o BatchMode=yes sysadmin@${TN} "grep -q '${CHECK_FQDN}' /srv/security-stack/systems/traefik/dynamic/keycloak.yml" 2>/dev/null; then
+                echo "  ${TN}: YES (in load balancer)"
+            else
+                echo "  ${TN}: NO (not in load balancer)"
+            fi
+        else
+            echo "  ${TN}: (no SSH access - check manually)"
+        fi
     done
 fi
 
