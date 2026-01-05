@@ -139,14 +139,43 @@ PGHBA"
         RESTART_REQUIRED=1
     fi
     
-    # Step 5: Restart PostgreSQL if needed
+    # Step 5: Set up port forwarding from host to container
+    log "Setting up port forwarding for PostgreSQL (5432)..."
+    
+    # Get the container IP
+    CONTAINER_IP=$(lxc exec ${CONTAINER_NAME} -- hostname -I | awk '{print $1}')
+    log "Container IP: ${CONTAINER_IP}"
+    
+    # Get the primary network interface
+    HOST_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+    log "Host interface: ${HOST_INTERFACE}"
+    
+    # Check if port forwarding rule already exists
+    if ! sudo iptables -t nat -C PREROUTING -i ${HOST_INTERFACE} -p tcp --dport 5432 -j DNAT --to-destination ${CONTAINER_IP}:5432 2>/dev/null; then
+        log "Adding iptables DNAT rule for port 5432..."
+        sudo iptables -t nat -A PREROUTING -i ${HOST_INTERFACE} -p tcp --dport 5432 -j DNAT --to-destination ${CONTAINER_IP}:5432
+        
+        # Make rules persistent
+        if [[ -d /etc/iptables ]]; then
+            sudo sh -c "iptables-save > /etc/iptables/rules.v4"
+            log "iptables rules saved to /etc/iptables/rules.v4"
+        fi
+    else
+        log "Port forwarding rule already exists"
+    fi
+    
+    # Verify the rule
+    log "Current port forwarding rules:"
+    sudo iptables -t nat -L PREROUTING -n | grep -E "5432|dpt:postgres" || log "  (no rules found - may need manual setup)"
+    
+    # Step 6: Restart PostgreSQL if needed
     if [[ "${RESTART_REQUIRED:-0}" -eq 1 ]]; then
         log "Restarting PostgreSQL to apply changes..."
         lxc exec ${CONTAINER_NAME} -- systemctl restart postgresql
         sleep 3
     fi
     
-    # Step 6: Verify PostgreSQL is running
+    # Step 7: Verify PostgreSQL is running
     if lxc exec ${CONTAINER_NAME} -- pg_isready -q; then
         log "PostgreSQL is running and ready"
     else
