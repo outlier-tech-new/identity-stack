@@ -296,12 +296,50 @@ PGCONF
         warn "PostgreSQL may not be in standby mode. Check logs."
     fi
     
+    # Step 9: Update Keycloak to use primary database
+    KEYCLOAK_CONTAINER="keycloak-lxc"
+    KEYCLOAK_CONF="/opt/keycloak/conf/keycloak.conf"
+    
+    if lxc info ${KEYCLOAK_CONTAINER} >/dev/null 2>&1; then
+        log "Updating Keycloak to use primary database (${PRIMARY_HOST})..."
+        
+        # Check current config
+        CURRENT_DB_URL=$(lxc exec ${KEYCLOAK_CONTAINER} -- grep "db-url" ${KEYCLOAK_CONF} 2>/dev/null || echo "not found")
+        log "Current Keycloak db-url: ${CURRENT_DB_URL}"
+        
+        # Update to point to primary
+        if lxc exec ${KEYCLOAK_CONTAINER} -- grep -q "db-url=jdbc:postgresql://" ${KEYCLOAK_CONF}; then
+            # Replace any postgresql URL with the primary host
+            lxc exec ${KEYCLOAK_CONTAINER} -- sed -i "s|db-url=jdbc:postgresql://[^/]*|db-url=jdbc:postgresql://${PRIMARY_HOST}|" ${KEYCLOAK_CONF}
+            
+            NEW_DB_URL=$(lxc exec ${KEYCLOAK_CONTAINER} -- grep "db-url" ${KEYCLOAK_CONF})
+            log "Updated Keycloak db-url: ${NEW_DB_URL}"
+            
+            # Restart Keycloak
+            log "Restarting Keycloak to apply database changes..."
+            lxc exec ${KEYCLOAK_CONTAINER} -- systemctl restart keycloak
+            sleep 5
+            
+            if lxc exec ${KEYCLOAK_CONTAINER} -- systemctl is-active keycloak >/dev/null 2>&1; then
+                log "Keycloak restarted successfully"
+            else
+                warn "Keycloak may not have started properly. Check logs:"
+                warn "  lxc exec ${KEYCLOAK_CONTAINER} -- journalctl -u keycloak -n 50"
+            fi
+        else
+            warn "Could not find db-url in Keycloak config. Manual update may be needed."
+        fi
+    else
+        warn "Keycloak container (${KEYCLOAK_CONTAINER}) not found. Skipping Keycloak configuration."
+    fi
+    
     echo ""
     echo "=============================================="
     echo "    STANDBY SETUP COMPLETE"
     echo "=============================================="
     echo ""
     echo "This node is now replicating from ${PRIMARY_HOST}"
+    echo "Keycloak has been updated to use the primary database."
     echo ""
     echo "Verify replication on PRIMARY:"
     echo "  lxc exec postgres-lxc -- sudo -u postgres psql -c 'SELECT * FROM pg_stat_replication;'"
