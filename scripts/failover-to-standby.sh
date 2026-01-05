@@ -168,7 +168,7 @@ fi
 
 step "3/6: Promoting PostgreSQL to primary..."
 
-run "lxc exec ${PG_CONTAINER} -- sudo -u postgres pg_ctl promote -D ${PG_DATA}"
+run "lxc exec ${PG_CONTAINER} -- sudo -u postgres /usr/lib/postgresql/${PG_VERSION}/bin/pg_ctl promote -D ${PG_DATA}"
 
 # Wait for promotion
 sleep 3
