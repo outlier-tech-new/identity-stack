@@ -55,3 +55,9 @@ else
     error "Promotion may have failed. Check: lxc exec ${PG_CONTAINER} -- journalctl -u postgresql -n 50"
 fi
 
+# Enable replication port so standbys can connect
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/idp-enable-replication.sh" ]]; then
+    log "Enabling replication port for standbys..."
+    bash "${SCRIPT_DIR}/idp-enable-replication.sh"
+fi
