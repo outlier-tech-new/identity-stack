@@ -455,3 +455,50 @@ role_attribute_path = contains(roles[*], 'admin') && 'Admin' || contains(roles[*
 }
 ```
 
+
+---
+
+## Part 8: Revised Approach Based on Review
+
+> See: [Access Governance Framework](./access-governance-framework.md) for full design
+
+### Key Decisions
+
+1. **Source of Truth**: Keycloak is the source of truth for actual accounts/roles. We document the *design* and *schema* but don't store user data in Git.
+
+2. **Provider-Agnostic Model**: Configuration should be logical (realms, roles, permissions) not Keycloak-specific. Adapters translate to provider.
+
+3. **Unified Onboarding**: Single command creates accounts in Keycloak, Authelia, SSH, GitHub, VPN - everything.
+
+4. **DARTIP Governance**: Every role has defined Decider, Approver, Reviewer, Tracker, Inputter, Performer.
+
+5. **Access Fingerprints**: Every entity (person, service, system) has a queryable profile of what it can access.
+
+6. **Self-Governing Loop**: Exceptions trigger role creation when threshold reached.
+
+7. **Business Ownership**: Team leads own their team's permission profile, not IT.
+
+### Revised Tomorrow's Tasks
+
+#### Morning: Governance Foundation
+1. Define DARTIP for initial roles (platform-admin, platform-ops, platform-readonly)
+2. Create logical model schema (provider-agnostic YAML)
+3. Build first adapter: keycloak/apply-role.sh
+
+#### Afternoon: Fingerprint System
+4. Design fingerprint schema for individuals and services
+5. Create fingerprint generator for existing admin user
+6. Document the exception workflow
+
+#### Evening: Onboarding Skeleton
+7. Create iam-onboard.sh skeleton (Keycloak + Authelia initially)
+8. Test with mock onboarding request
+9. Document the pattern for adding more adapters
+
+### What This Means for the Stack
+
+- **identity-stack**: Logical model, fingerprints, adapters
+- **security-stack**: Authelia adapter, SSH adapter, firewall rules
+- **Separate repo (future)**: `access-governance/` with model and all adapters
+
+The key insight: **IT owns the process, business owns the permissions.**
