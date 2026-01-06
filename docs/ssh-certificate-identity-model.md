@@ -86,7 +86,7 @@ Certificate:
     - ops@sec001                          # Allowed: ops on sec001
     - ops@sec002                          # Allowed: ops on sec002
     - admin@idp001                        # Allowed: admin on idp001
-  Valid: 2026-01-06T10:00:00 to 2026-01-06T22:00:00 (12 hours)
+  Valid: 2026-01-06T10:00:00 to 2026-01-06T18:00:00 (8 hours)
   Critical Options: (none)
   Extensions:
     permit-pty
@@ -104,7 +104,19 @@ Certificate:
 
 ### 1.4 Principal Mapping
 
-Keycloak roles determine which principals appear in the certificate:
+Keycloak roles and group-based access rules determine which principals appear in the certificate.
+
+#### Principal naming model (Option B: fine-grained)
+
+We deliberately avoid “global role” principals (like `ops` or `ops@*`) to reduce accidental broad access.
+
+Principals are always scoped:
+- `readonly@<host>` (e.g. `readonly@sec001`)
+- `ops@<host>` (e.g. `ops@idp001`)
+- `admin@<host>` (e.g. `admin@nas001`)
+- Optional: `ops@<group>` / `admin@<group>` for **named host groups** (e.g. `ops@security`, `admin@identity`)
+  - Host groups are explicit and finite (no wildcards).
+  - A host may accept both its host principal and one or more group principals.
 
 ```yaml
 # Keycloak Role → Certificate Principal Mapping
@@ -114,7 +126,10 @@ keycloak-role: platform-ops
     - ops@sec002
     - ops@idp001
     - ops@idp002
-    - readonly@*            # Wildcard for all servers
+    - readonly@sec001
+    - readonly@sec002
+    - readonly@idp001
+    - readonly@idp002
 
 keycloak-role: platform-admin
   principals:
@@ -122,7 +137,21 @@ keycloak-role: platform-admin
     - admin@sec002
     - admin@idp001
     - admin@idp002
-    - ops@*                 # Includes all ops access
+    - ops@sec001
+    - ops@sec002
+    - ops@idp001
+    - ops@idp002
+
+# Optional: Host-group access (preferred over wildcards)
+# keycloak-role: platform-ops
+#   principals:
+#     - ops@security
+#     - readonly@security
+#
+# keycloak-role: platform-admin
+#   principals:
+#     - admin@identity
+#     - ops@identity
 ```
 
 ---
@@ -137,9 +166,15 @@ keycloak-role: platform-admin
 - During their authenticated session
 
 **How long is it valid?**
-- Default: 12 hours (configurable)
+- Default: 8 hours (configurable)
 - Maximum: 24 hours
 - Can be shorter for high-security environments
+
+Recommended TTL tiers:
+- `readonly@*`: 8–12 hours (low risk)
+- `ops@*`: 4–8 hours (medium risk)
+- `admin@*`: 30–120 minutes (high impact)
+- `sysadmin` (breakglass): password-based only (no cert)
 
 **What principals are included?**
 - Determined by Keycloak roles
@@ -169,7 +204,7 @@ sshd checks:
 # sshd_config on each server
 TrustedUserCAKeys /etc/ssh/ca-user.pub
 AuthorizedPrincipalsFile /etc/ssh/principals/%u
-RevokedKeys /etc/ssh/revoked_keys        # Optional: for revocation
+RevokedKeys /etc/ssh/revoked_keys        # OpenSSH KRL (Key Revocation List)
 LogLevel VERBOSE
 ```
 
@@ -192,13 +227,13 @@ LogLevel VERBOSE
 **When to use:** User leaving company, suspected compromise
 
 #### Level 3: Certificate Revocation (Immediate)
-- Add certificate serial to revocation list
-- Pushed to all servers
+- Add certificate serial (or key) to revocation list (KRL)
+- Distributed to all servers
 - Immediate denial of access
 
 **When to use:** Active security incident, immediate access removal needed
 
-**Revocation implementation:**
+**Revocation implementation (OpenSSH KRL):**
 ```bash
 # Add certificate to revocation list
 step ssh revoke --serial 12345
@@ -209,6 +244,11 @@ for server in $(cat /etc/servers.txt); do
   ssh $server "systemctl reload sshd"
 done
 ```
+
+Notes:
+- `RevokedKeys` supports OpenSSH KRL files (not just “a list of keys”).
+- Prefer revoking by **certificate serial** for emergency response.
+- TTL remains the primary safety mechanism; revocation is for “need it now” events.
 
 ### 2.4 Renewal
 
@@ -381,16 +421,15 @@ Match User ops,admin,readonly
 # /etc/ssh/principals/ops
 # Users with these principals can SSH as 'ops'
 ops@sec001
-platform-ops
+ops@security
 
 # /etc/ssh/principals/admin
 admin@sec001
-platform-admin
+admin@security
 
 # /etc/ssh/principals/readonly
 readonly@sec001
-platform-readonly
-readonly@*
+readonly@security
 ```
 
 ### 5.3 CA Public Key
@@ -435,6 +474,40 @@ ssh ops@sec001.outliertechnology.co.uk
 # SSH with explicit identity (if multiple certs)
 ssh -o CertificateFile=~/.ssh/id_ecdsa-cert.pub ops@sec001
 ```
+
+---
+
+## 6.4 SSH Host Certificates (No TOFU)
+
+### What we want
+- Servers present **host certificates** signed by the SSH Host CA.
+- Clients trust hosts via `@cert-authority` in `known_hosts` (or `step ssh config` output).
+- Host keys can rotate without re-touching every client.
+
+### Server-side configuration (host cert)
+On each server:
+- Generate host key (normal OpenSSH)
+- Obtain a host certificate from step-ca
+- Configure sshd to present it
+
+Example sshd config lines:
+```text
+# Host key + host certificate
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub
+```
+
+### Client trust configuration (host CA)
+On each admin workstation, install the SSH Host CA public key in `~/.ssh/known_hosts` as a cert-authority line:
+```text
+@cert-authority *.outliertechnology.co.uk ssh-ed25519 AAAA... step-ca-ssh-host-ca
+```
+
+### Renewal and rotation
+- Host certificates should be short-lived (e.g. 30–90 days) and renewed automatically during normal config management runs.
+- In an incident, you can revoke a host certificate via KRL distribution to clients (optional), but practical containment usually comes from:
+  - removing trust in the host CA (rare/emergency), or
+  - re-issuing host certs after remediation and enforcing stricter network segmentation during DEFCON.
 
 ### 6.3 Certificate Expired
 
@@ -518,9 +591,9 @@ Need investigation before new certificate issuance.
 
 | Keycloak Role | Server Accounts |
 |---------------|-----------------|
-| platform-readonly | readonly@* |
-| platform-ops | ops@*, readonly@* |
-| platform-admin | admin@*, ops@*, readonly@* |
+| platform-readonly | readonly@<host> (and/or readonly@<group>) |
+| platform-ops | ops@<host> (and/or ops@<group>), plus readonly equivalents |
+| platform-admin | admin@<host> (and/or admin@<group>), plus ops/readonly equivalents |
 | breakglass-{server} | sysadmin@{server} (via OpenBao) |
 
 ### Commands Cheatsheet
